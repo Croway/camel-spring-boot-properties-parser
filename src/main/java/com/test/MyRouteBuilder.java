@@ -48,6 +48,7 @@ public class MyRouteBuilder extends RouteBuilder {
             .log("{{my.secret.password}}");
 
         StringEncryptor encryptor = configureEncryptor();
+
         JasyptPropertiesParser jasyptParser = jasyptParser(encryptor);
         PropertiesComponent propertiesComponent = getPropertiesComponent();
         propertiesComponent.setPropertiesParser(jasyptParser);

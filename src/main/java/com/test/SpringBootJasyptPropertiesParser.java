@@ -1,6 +1,14 @@
 package com.test;
 
 import org.apache.camel.component.jasypt.JasyptPropertiesParser;
+import org.apache.camel.component.jasypt.springboot.EncryptablePropertySourcesPlaceholderConfigurer;
+import org.apache.camel.component.jasypt.springboot.JasyptEncryptedPropertiesAutoconfiguration;
+import org.apache.camel.component.jasypt.springboot.JasyptEncryptedPropertiesConfiguration;
+import org.apache.camel.component.properties.PropertiesParser;
+import org.apache.camel.util.ObjectHelper;
+import org.apache.camel.util.StringHelper;
+import org.jasypt.encryption.StringEncryptor;
+import org.jasypt.encryption.pbe.config.EnvironmentStringPBEConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
@@ -16,55 +24,53 @@ import java.util.Properties;
 public class SpringBootJasyptPropertiesParser implements ApplicationListener<ApplicationEnvironmentPreparedEvent> {
     private static final Logger LOG = LoggerFactory.getLogger(SpringBootJasyptPropertiesParser.class);
 
-    private JasyptPropertiesParser jasyptParser(String password,
-        String algorithm,
-        String randomIvGeneratorAlgorithm,
-        String randomSaltGeneratorAlgorithm) {
-
-        JasyptPropertiesParser jasypt = new JasyptPropertiesParser();
-        jasypt.setPassword(password);
-        if (randomIvGeneratorAlgorithm != null) {
-            jasypt.setRandomIvGeneratorAlgorithm(randomIvGeneratorAlgorithm);
-        }
-        if (randomSaltGeneratorAlgorithm != null) {
-            jasypt.setRandomSaltGeneratorAlgorithm(randomSaltGeneratorAlgorithm);
-        }
-        if (algorithm != null) {
-            jasypt.setAlgorithm(algorithm);
-        }
-
-        return jasypt;
-    }
-
     public void onApplicationEvent(ApplicationEnvironmentPreparedEvent event) {
         ConfigurableEnvironment environment = event.getEnvironment();
 
-        // Autoconfigure jasypt component
-        String password = event.getEnvironment().getProperty("camel.component.jasypt.password");
-        String algorithm = environment.getProperty("camel.component.jasypt.algorithm");
-        String randomIvGeneratorAlgorithm = event.getEnvironment().getProperty("camel.component.jasypt.random-iv-generator-algorithm");
-        String randomSaltGeneratorAlgorithm = environment.getProperty("camel.component.jasypt.random-salt-generator-algorithm");
-
         final Properties props = new Properties();
 
-        final JasyptPropertiesParser jasyptPropertiesParser =
-            jasyptParser(password, algorithm, randomIvGeneratorAlgorithm, randomSaltGeneratorAlgorithm);
+        String enabled = environment.getProperty("camel.component.jasypt.decrypt.properties.enabled");
 
-        for (PropertySource mutablePropertySources : event.getEnvironment().getPropertySources()) {
-            if (mutablePropertySources instanceof MapPropertySource mapPropertySource) {
-                mapPropertySource.getSource().forEach((key, value) -> {
-                    if (value instanceof OriginTrackedValue originTrackedValue &&
-                        originTrackedValue.getValue() instanceof String stringValue &&
-                        stringValue.startsWith(JasyptPropertiesParser.JASYPT_PREFIX_TOKEN) &&
-                        stringValue.endsWith(JasyptPropertiesParser.JASYPT_SUFFIX_TOKEN)) {
-
-                        LOG.debug("decrypting and overriding property {}", key);
-                        props.put(key, jasyptPropertiesParser.parseProperty(key.toString(), stringValue, null));
-                    }
-                });
+        if (Boolean.parseBoolean(enabled)) {
+            // Manual Autoconfigure jasypt component
+            JasyptEncryptedPropertiesAutoconfiguration jasyptEncryptedPropertiesAutoconfiguration = new JasyptEncryptedPropertiesAutoconfiguration();
+            JasyptEncryptedPropertiesConfiguration jasyptEncryptedPropertiesConfiguration =
+                jasyptEncryptedPropertiesAutoconfiguration.JasyptEncryptedPropertiesAutoconfiguration(event.getEnvironment());
+            // this code is missing from Camel Spring Boot
+            String password = jasyptEncryptedPropertiesConfiguration.getPassword();
+            if (password.startsWith("sysenv:")) {
+                password = System.getenv(StringHelper.after(password, "sysenv:"));
             }
-        }
+            if (ObjectHelper.isNotEmpty(password) && password.startsWith("sys:")) {
+                password = System.getProperty(StringHelper.after(password, "sys:"));
+            }
+            jasyptEncryptedPropertiesConfiguration.setPassword(password);
+            EnvironmentStringPBEConfig environmentStringPBEConfig =
+                jasyptEncryptedPropertiesAutoconfiguration.environmentVariablesConfiguration(jasyptEncryptedPropertiesConfiguration);
+            StringEncryptor stringEncryptor =
+                jasyptEncryptedPropertiesAutoconfiguration.stringEncryptor(environmentStringPBEConfig);
+            EncryptablePropertySourcesPlaceholderConfigurer encryptablePropertySourcesPlaceholderConfigurer =
+                jasyptEncryptedPropertiesAutoconfiguration.propertyConfigurer(stringEncryptor);
+            PropertiesParser propertiesParser = jasyptEncryptedPropertiesAutoconfiguration.encryptedPropertiesParser(environment,
+                stringEncryptor,
+                environment);
 
-        environment.getPropertySources().addFirst(new PropertiesPropertySource("overridden-properties", props));
+            for (PropertySource mutablePropertySources : event.getEnvironment().getPropertySources()) {
+                if (mutablePropertySources instanceof MapPropertySource mapPropertySource) {
+                    mapPropertySource.getSource().forEach((key, value) -> {
+                        if (value instanceof OriginTrackedValue originTrackedValue &&
+                            originTrackedValue.getValue() instanceof String stringValue &&
+                            stringValue.startsWith(JasyptPropertiesParser.JASYPT_PREFIX_TOKEN) &&
+                            stringValue.endsWith(JasyptPropertiesParser.JASYPT_SUFFIX_TOKEN)) {
+
+                            LOG.debug("decrypting and overriding property {}", key);
+                            props.put(key, propertiesParser.parseProperty(key.toString(), stringValue, null));
+                        }
+                    });
+                }
+            }
+
+            environment.getPropertySources().addFirst(new PropertiesPropertySource("overridden-camel-jasypt-properties", props));
+        }
     }
 }
